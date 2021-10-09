@@ -1,5 +1,5 @@
 
-# push an existing project to github
+# for an existing project, create a github repo and push
 # usethis::use_github()
 
 # check gitignore (from bash)
