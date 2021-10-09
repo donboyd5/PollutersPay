@@ -1,0 +1,307 @@
+---
+title: "Reports for individual entities"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+# output:
+#   pdf_document:
+#     latex_engine: xelatex
+# output:  html_document
+output:  
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    # number_sections: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+
+```{r libraries}
+
+library(tidyverse)
+options(tibble.print_max = 65, tibble.print_min = 65) # if more than 60 rows, print 60 - enough for states
+# ggplot2 tibble tidyr readr purrr dplyr stringr forcats
+library(scales)
+library(stringi)
+
+library(readxl)
+library(btools)
+library(kableExtra)
+
+# require(devtools)
+# install_version("openxlsx", version = "4.2.3", repos = "http://cran.us.r-project.org")  # 4.2.4 broke my code
+library(openxlsx)
+library(gt)
+
+# devtools::install_github("bmewing/mgsub")
+library(mgsub)
+
+# av <- available.packages(filters=list())
+# av[av[, "Package"] == "kable", ]
+# pdflatex lualatex xelatex
+# https://bookdown.org/yihui/rmarkdown-cookbook/install-latex-pkgs.html
+# tinytex::parse_install("CompanyReports.log")
+# tinytex::install_tinytex()
+
+# tinytex::parse_install(
+#   text = "! LaTeX Error: File `unicode-math.sty' not found."
+# )
+  # pdf_document:
+  #   latex_engine: xelatex
+# library(tinytex)
+# tlmgr_search('tlpsv')
+# tlmgr_install(pkgs = 'tlpsv')
+# tinytex::tlmgr_install(c('texlive-scripts', 'dehyph-exptl'))
+# install.packages('tinytex')
+# tinytex::install_tinytex()
+# 
+# writeLines(c(
+#   '\\documentclass{article}',
+#   '\\begin{document}', 'Hello world!', '\\end{document}'
+# ), 'test.tex')
+# tinytex::pdflatex('test.tex')
+
+
+```
+
+<!-- \newpage -->
+
+<!-- # load and work with maindata -->
+```{r load_main_data, include=FALSE}
+load(file=here::here("data", "maindata.Rdata"), verbose=TRUE)
+
+# global6518  # global emissions 1965-2018, MtCO2e
+# ongl_factors  # conversion factors
+# ng_factors  # conversion factors
+# coal_factors  # conversion factors
+# uninames  # df with uid, uninmame, plus alternative names used in files
+# ucombo6518  # df with uid uniname rank ptype co2 fmethane total fmethane_ch4; total includes coal and cement
+# usumrank_long  # allows computing coal and cement percents for the period covered
+comment(udca_base)
+comment(uninames)
+comment(ucombo6518)
+comment(usumrank_long)
+comment(global6518)
+comment(global6518_xcement)
+comment(global_shares)
+
+# Sys.getenv("R_PDFVIEWER")
+
+```
+
+
+```{r constants}
+vlabs <- tribble(~name, ~label,
+                 "dca_base", "Emissions (MtCO2 & MtCH4 emissions, excluding cement and coal, 1965-2018)",
+                 "pct_emissions", "Entity emissions as % of total such emissions",
+                 "reachable", "Possibility of assessment (judgment call)",
+                 "url", "url",
+                 "hq_location", "Headquarters",
+                 "profile", "Profile",
+                 "us_subs", "U.S. subsidiaries, if found",
+                 "us_production", "U.S. energy production, if found",
+                 "us_locations", "Locations in the U.S., if found",
+                 "us_office", "Offices in the U.S., if found",
+                 "us_other", "Other notable U.S.-related activities"
+                 )
+
+```
+
+
+```{r functions}
+
+urls_to_md <- function(s){
+  # convert urls in a string to markdown so that they can be highlighted
+  url_pattern <- "(http|ftp|https)://([\\w_-]+(?:(?:\\.[\\w_-]+)+))([\\w.,@?^=%&:/~+#-]*[\\w@?^=%&/~+#-])?"
+  urls_raw <- str_extract_all(s, url_pattern)
+  urls_raw <- unlist(urls_raw)
+  if(length(urls_raw) >= 1){
+    urls_md <- paste0("<", urls_raw, ">")
+    s2 <- mgsub::mgsub(s, pattern=urls_raw, replacement=urls_md, fixed=TRUE)
+  } else s2 <- s
+  s2
+}
+
+get_uids <- function(group, dcamin=0){
+  uid_df %>%
+    filter(group==!!group, dca_base >= !!dcamin) %>%
+    select(uid) %>%
+    .[["uid"]]
+}
+
+
+```
+
+
+<!-- # Rob's U.S. operations question - Aug-Sep 2021 -->
+```{r report_functions}
+entity_report <- function(uidc){
+  tab1 <- dfl %>%
+    filter(uid==uidc) %>%
+    select(uid, table_name, ptype, fd, country, name, value) %>%
+    mutate(name=factor(name, levels=vlabs$name, labels=vlabs$label)) %>%
+    arrange(name)
+  
+  # create title
+  name <- tab1$table_name[1]
+  country <- tab1$country[1]
+  ptype <- tab1$ptype[1]
+  fd <- tab1$fd[1]
+  
+  title <- paste0(name, "\nType: ", ptype, ".  Country: ", country, ". ID #: ", uidc)
+  
+  tab2 <- tab1 %>%
+    select(name, value) %>%
+    gt() %>%
+    tab_options(
+      table.width = pct(100)
+      ) %>%
+    tab_header(
+      title = md(paste0("**", title, "**"))
+      ) %>%
+    cols_label(name=md("**Item**"),
+               value=md("**Description**")) %>%
+    cols_width(
+      name ~ pct(20),
+      value ~ pct(80)
+      ) %>%
+    tab_style(
+      style = list(
+        cell_text(weight = "bold")
+        ),
+      locations = cells_body(
+        columns = name)
+      ) %>%
+    cols_align(align = "left",
+               columns = everything()
+               ) %>%
+    fmt_markdown(columns = value) %>%
+    fmt_missing(columns = value,
+                missing_text="")
+  cat("\r")
+  cat("## ", name, "\n")
+  print(tab2)
+  plot.new()
+  dev.off()
+  cat("\n\n")
+}
+
+report <- function(uids){
+  for(uidc in uids){
+    entity_report(uidc)
+  }
+}
+
+```
+
+
+```{r get_data, eval=TRUE}
+
+fn <- "top108(17).xlsx"
+df1 <- read_excel(here::here("data", fn), sheet="receipts_table", range="A3:AA111", col_types = "text")
+df1 %>% filter(uid==69) %>% select(us_subs) %>% write_csv(here::here("temp.csv"))
+
+# get rid of non-ASCII characters
+fix_apostrophe <- function(s){
+  str_replace_all(s, coll("’"), "'")
+}
+
+# df1 %>% 
+#   filter(uid==69) %>% 
+#   select(us_subs) %>% 
+#   mutate(us_subs=fix_apostrophe(us_subs)) %>% 
+#   write_csv(here::here("temp.csv"))
+
+df <- df1 %>%
+  mutate(uid=as.integer(uid),
+         across(c(total_revenue_millions, revenue, total, dca_base, rob_payor), as.numeric),
+         across(-c(uid, total_revenue_millions, revenue, total, dca_base, rob_payor), fix_apostrophe),
+         # convert to ascii ONLY after we've fixed things we know we can fix
+         across(-c(uid, total_revenue_millions, revenue, total, dca_base, rob_payor), 
+                .fns = function(x) iconv(x, "UTF-8", "ASCII", sub=""))) %>%
+  rowwise() %>%
+  mutate(across(-c(uid, total_revenue_millions, revenue, total, dca_base, rob_payor), urls_to_md)) %>%
+  ungroup
+
+entities <- df %>%
+  select(uid:reachable, rob_payor) %>%
+  left_join(udca_base %>%
+              select(uid, dca_base),
+            by="uid") %>%
+    mutate(group=case_when(ptype=="Nation-State" ~ "nation",
+                         ptype=="SOE" ~ "SOE",
+                         ptype=="IOC" & fd=="foreign" ~ "fIOC",
+                         ptype=="IOC" & fd=="domestic" ~ "dIOC",
+                         TRUE ~ "ERROR"),
+           label=factor(group, 
+                      levels=c("nation", "SOE", "fIOC", "dIOC"),
+                      labels=c("Nation-State Entity",
+                               "State-Owned Enterprise",
+                               "Foreign Investor-Owned Company",
+                               "Domestic Investor-Owned Company")),
+           pct_emissions=dca_base / global6518_xcement) # really a proportion, not a percent
+
+
+dfl <- entities %>%
+  select(uid, table_name, ptype, rob_payor, fd, country, 
+         profile, url, hq_location:us_other, reachable, dca_base, pct_emissions) %>%
+  # convert numeric data to character so that when we pivot, all are character
+  mutate(dca_base=comma(dca_base, accuracy=.1),
+         pct_emissions=percent(pct_emissions, accuracy=.001)) %>%
+  pivot_longer(cols=profile:pct_emissions) %>%
+  mutate(value=md(value)) %>%
+  arrange(table_name)
+# dfl %>% filter(uid==87, name=="profile") %>% select(value) %>% write_csv(here::here("temp2.csv"))
+
+```
+
+
+<!-- # css code allows greater width for the table -->
+
+<style type="text/css">
+div.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+
+```{r final_data_prep, warning=FALSE, message=FALSE}
+coal_drops <- c(7, 11, 16, 19, 21, 24, 25, 36, 44, 52, 56, 57, 74, 83, 99, 100, 104)
+
+uid_df <- entities %>% 
+  filter(uid != 36) %>% # always drop the Former Soviet Union
+  filter(!uid %in% coal_drops) %>%
+  select(label, group, uid, table_name, dca_base) %>%
+  arrange(label, desc(dca_base))
+
+
+save(entities, coal_drops, uid_df, file=here::here("data", "report_data.rdata"))
+# tmp <- uid_df %>% filter(dca_base > 0)  # 70 entities
+
+```
+
+
+```{r run_report, echo=FALSE, include=TRUE, results='asis'}
+
+cat("# Nation-State Entities", "\n")
+report(get_uids("nation", dcamin=1e-6))
+
+cat("# State-Owned Enterprises", "\n")
+report(get_uids("SOE", dcamin=1e-6))
+
+cat("# Foreign Investor-Owned Companies", "\n")
+report(get_uids("fIOC", dcamin=1e-6))
+
+cat("# Domestic Investor-Owned Companies", "\n")
+report(get_uids("dIOC", dcamin=1e-6))
+
+# report(get_uids("dIOC", dcamin=1e-6))
+# report(66)
+
+```
+

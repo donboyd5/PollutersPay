@@ -1,0 +1,1770 @@
+---
+title: "Polluters Pay Fund"
+author: "Don Boyd"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_notebook:
+    df_print: paged
+    fig_height: 6
+    fig_width: 8
+    toc: yes
+    toc_depth: 3
+    toc_float: true
+    number_sections: yes
+editor_options:
+  chunk_output_type: console
+---
+
+
+<!-- Questions:
+- why does Rick Heede exclude British Coal from his top 20?
+
+-->
+
+
+```{r setup, include=FALSE, eval=TRUE}
+knitr::opts_chunk$set(echo = FALSE, include=FALSE, eval=FALSE, message = FALSE, warning = FALSE, rows.print=60)
+```
+
+
+
+```{r libraries}
+
+library(tidyverse)
+options(tibble.print_max = 65, tibble.print_min = 65) # if more than 60 rows, print 60 - enough for states
+# ggplot2 tibble tidyr readr purrr dplyr stringr forcats
+
+library(readxl)
+library(btools)
+library(kableExtra)
+
+# require(devtools)
+# devtools::install_version("openxlsx", version = "4.2.3", repos = "http://cran.us.r-project.org")  # 4.2.4 broke my code
+library(openxlsx)
+library(gt)
+
+# av <- available.packages(filters=list())
+# av[av[, "Package"] == "kable", ]
+
+```
+
+
+```{r functions}
+str_before_last <- function(s, pattern){
+  last <- stringi::stri_locate_last_fixed(s, pattern)[, 1]
+  last <- ifelse(is.na(last), -1, last - 1)
+  str_sub(s, 1, last)
+}
+```
+
+
+
+# load and work with maindata
+```{r load_main_data}
+load(file=here::here("data", "maindata.Rdata"), verbose=TRUE)
+
+# global6518  # global emissions 1965-2018, MtCO2e
+# ongl_factors  # conversion factors
+# ng_factors  # conversion factors
+# coal_factors  # conversion factors
+# uninames  # df with uid, uninmame, plus alternative names used in files
+# ucombo6518  # df with uid uniname rank ptype co2 fmethane total fmethane_ch4; total includes coal and cement
+# usumrank_long  # allows computing coal and cement percents for the period covered
+comment(udca_base)
+comment(uninames)
+comment(ucombo6518)
+comment(usumrank_long)
+comment(global6518)
+comment(global6518_xcement)
+comment(global_shares)
+
+# write_csv(uninames, here::here("data", "uninames.csv"))
+# write_csv(udca_base %>%
+#   select(uid, uniname, ptype, total, dca_base), here::here("data", "top108.csv"))
+
+```
+
+
+
+# Rob's U.S. operations question - Aug-Sep 2021
+```{r}
+# see separate CompanyReports.Rmd file
+
+```
+
+
+
+## Lee's location questions -- late July
+```{r}
+payors <-  read_csv(here::here("results", "payors.csv"))
+
+
+fn <- "top108(11).xlsx"
+df <- read_excel(here::here("data", fn), 
+                 sheet="receipts_table", 
+                 range="A2:AD110")
+
+ns(df)
+check <- df %>% select(uid, uniname, table_name, symbol)
+
+df2 <- df %>% 
+  right_join(payors %>%  
+               select(uid, uniname_payors=uniname, payor),
+             by = "uid") %>%
+  filter(ptype=="IOC") %>%
+  mutate(symbol=ifelse(is.na(symbol), "--", symbol),
+         table_name=str_before_last(table_name, ",")) %>%
+  filter(symbol != "SWN",   # Lee wants to exclude Southwestern
+         uniname != "PetroEcuador")  # I think this is state owned
+
+
+df2 %>% select(uid, uniname, table_name, symbol)
+ns(df2)
+
+df3 <- df2 %>%
+  select(uniname, uid, table_name, symbol, hq_location, locations)
+
+df3 %>%
+  write_csv(here::here("results", "locations.csv"))
+
+
+```
+
+
+
+## Rob Plattner's market share questions -- late July 
+```{r}
+# get Rob's subset of likely payors
+rp_payors <- read_excel(path=here::here("data", "pptables 62.xlsx"),
+                     sheet="IOC_raw",
+                     range="A1:A32") %>%
+  filter(!is.na(uniname))
+
+# get all 108 entities
+dca_total_max <- 4000 # $ billions
+dca_total_annual <- 50 # $ billions
+
+rp_base <- udca_base  %>%
+  select(uid, uniname, ptype, dca_base) %>%
+  left_join(rp_payors %>% mutate(payor=TRUE), by = "uniname") %>%
+  mutate(pct=dca_base / global6518_xcement,
+         robpayor=ifelse(is.na(payor), FALSE, payor),
+         payor=robpayor & (pct > 0.0004),
+         payor_dca_base=sum(ifelse(payor, dca_base, 0)),
+         pct_payors=ifelse(payor, dca_base / payor_dca_base, 0),
+         dca_max = pct * dca_total_max,
+         dca_annual = pct_payors * dca_total_annual) %>% 
+  arrange(payor, -pct)
+
+details <- read_excel(here::here("data", "top108(7).xlsx"), sheet="receipts_table", range="A2:P110")
+glimpse(details)
+count(details, ptype, fd, country)
+
+df <- rp_base %>%
+  select(-ptype) %>%
+  left_join(details %>%
+              select(uid, stock_name, symbol, ptype, fd, country, notes, exchange,
+                     total_revenue_millions, profile_schwab), by = "uid")
+glimpse(df)
+
+
+levels <- c("notIOC", "largeIOC", "domestic", "foreign", "toosmall")
+labels <- c("Not investor-owned", 
+            "IOC and entity assessment is >= 1% of total payment",
+            "domestic IOC and assessment < 1% of total assessment",
+            "foreign IOC and assessment < 1% of total assessment",
+            "not assessable or below 0.04% assessment threshold")
+
+tab <- df %>%
+  mutate(group=case_when(ptype != "IOC" ~ "notIOC", 
+                         !robpayor ~ "toosmall",
+                         pct_payors >= 0.01 ~ "largeIOC",
+                         fd=="domestic" ~ "domestic",
+                         fd=="foreign" ~ "foreign",
+                         TRUE ~ "other")) %>%
+  mutate(group=factor(group, levels=levels, labels=labels)) %>%
+  group_by(group) %>%
+  summarise(number_of_entities=n(),
+            pct_of_total_CO2=sum(pct, na.rm=TRUE) * 100,
+            pct_of_assessment=sum(pct_payors, na.rm=TRUE) * 100,
+            dca_annual = sum(dca_annual, na.rm=TRUE),
+            total_revenue_billions=sum(total_revenue_millions, na.rm=TRUE) / 1000,
+            .groups = "drop")
+
+
+tots <- tab %>%
+  select(-group) %>%
+  summarise(across(everything(), ~sum(.x, na.rm=TRUE))) %>%
+  mutate(group="  Total")
+
+tab2 <- bind_rows(tab, tots) %>%
+  mutate(dca_pct_revenue=dca_annual / total_revenue_billions * 100)
+  
+
+tab2 %>%
+  kable(digits=1, format.args = list(big.mark=","), format = "rst")
+
+
+# question #2
+df %>%
+  filter(pct_payors >= .03, ptype=="IOC") %>%
+  mutate(total_revenue_billions=total_revenue_millions / 1000) %>%
+  select(uniname, dca_annual, total_revenue_billions) %>%
+  mutate(dca_pct_revenue=dca_annual / total_revenue_billions * 100) %>%
+  kable(digits=1, format.args = list(big.mark=","), format = "rst")
+  
+
+
+
+```
+
+
+
+
+## Rob Plattner's summary table -- Late June 2021 version
+```{r}
+# dca: damage compensation assessment
+
+# get Rob's subset of likely payors
+rp_payors <- read_excel(path=here::here("data", "pptables 62.xlsx"),
+                     sheet="IOC_raw",
+                     range="A1:A32") %>%
+  filter(!is.na(uniname))
+
+# get all 108 entities
+dca_total_max <- 4000 # $ billions
+dca_total_annual <- 50 # $ billions
+
+rp_base <- udca_base  %>%
+  select(uid, uniname, ptype, dca_base) %>%
+  left_join(rp_payors %>% mutate(payor=TRUE), by = "uniname") %>%
+  mutate(pct=dca_base / global6518_xcement,
+         robpayor=ifelse(is.na(payor), FALSE, payor),
+         # payor2=ifelse((ptype %in% c("IOC", "SOE")) &
+         #                 (pct > 0.0025), TRUE, FALSE),  # this counts Gazprom, Iran, PetroChina...
+         payor=robpayor & (pct > 0.0004),
+         payor_dca_base=sum(ifelse(payor, dca_base, 0)),
+         pct_payors=ifelse(payor, dca_base / payor_dca_base, 0),
+         dca_max = pct * dca_total_max,
+         dca_annual = pct_payors * dca_total_annual) %>% 
+  arrange(payor, -pct)
+
+payors <- rp_base %>%
+  filter(payor)
+payors %>%
+  write_csv(here::here("results", "payors.csv"))
+
+rp_base %>%
+  filter(payor != robpayor)
+
+rp_base %>%
+  group_by(payor) %>%
+  summarise(pct=sum(pct), dca_base=sum(dca_base), dca_annual=sum(dca_annual), dca_max=sum(dca_max))
+count(rp_base, payor)
+
+```
+
+
+
+```{r}
+# create the table
+
+outfile <- "PPTable_v3.xlsx"  # name of the output file
+wb <- loadWorkbook(file = here::here("data", "PPShell2.xlsx"))
+# get the sheets we want
+sname <- "PPTable"
+cloneWorksheet(wb, sheetName=sname, clonedSheet = "TableShell_LateJune")
+removeWorksheet(wb, "TableShell_LateJune")
+removeWorksheet(wb, "TableShell_LateJuneBak")
+removeWorksheet(wb, "TableShell_LateJuneOld")
+
+
+df <- rp_base %>%
+  mutate(blank="") # so we can have a blank column
+
+part1 <- df %>%
+  filter(payor) %>%
+  select(uniname, pct, dca_max, blank, pct_payors, dca_annual) %>%
+  arrange(desc(dca_annual))
+
+gtotal <- part1 %>%
+  summarise(uniname="Grand total of above", 
+            pct=sum(pct), 
+            dca_max=sum(dca_max),
+            blank=first(blank),
+            pct_payors=sum(pct_payors),
+            dca_annual=sum(dca_annual))
+
+# first write the details
+datastart <- 9
+writeData(wb, sheet = sname, x=part1, startCol=1, startRow=datastart, rowNames = FALSE, colNames = FALSE)
+
+# now write the summary
+writeData(wb, sheet = sname, x=gtotal, 
+          startCol=1, startRow=datastart + nrow(part1) + 1, rowNames = FALSE, colNames = FALSE)
+
+# define styles
+curr2 <- createStyle(numFmt = "$0.00")
+num2 <- createStyle(numFmt = "0.00")
+curr3 <- createStyle(numFmt = "$0.000")
+num3 <- createStyle(numFmt = "0.000")
+
+
+pct1 <- createStyle(numFmt = "0.0%")
+pct2 <- createStyle(numFmt = "0.00%")
+
+addStyle(wb, sheet = sname, style = pct2, rows=datastart:200, cols = c(2, 5), gridExpand = TRUE)
+addStyle(wb, sheet = sname, style = curr3, rows=datastart, cols = c(3, 6))
+addStyle(wb, sheet = sname, style = num3, rows=(datastart + 1):200, cols = c(3, 6), gridExpand = TRUE)
+
+totalrow <- datastart + nrow(part1) + 1
+totstyle <- createStyle(fontSize = 11, fgFill = "#f0f0f0", border = "TopBottom", borderColour = "#f0f0f0")
+
+addStyle(wb, sheet = sname, style = curr3, rows=totalrow, cols = c(3, 6))
+addStyle(wb, sheet = sname, style = totstyle, rows = totalrow, cols = 1:6, stack=TRUE)
+
+# write the note
+note_intro <- "Notes:"
+note1 <- "  *  Maximum Cumulative Damage Assessment Based on Assumed $4 Trillion Total Damages."
+note2 <- "  ** Assumes the Climage Damage Compensation Assessment is only applied to polluters accounting for at least 0.04% of historical global emissions."
+
+
+note_start <- datastart + nrow(part1) + 3
+
+writeData(wb, sheet = sname, x=note_intro, 
+          startCol=1, startRow=note_start, rowNames = FALSE, colNames = FALSE)
+writeData(wb, sheet = sname, x=note1, 
+          startCol=1, startRow=note_start + 1, rowNames = FALSE, colNames = FALSE)
+writeData(wb, sheet = sname, x=note2, 
+          startCol=1, startRow=note_start + 2, rowNames = FALSE, colNames = FALSE)
+
+saveWorkbook(wb, file = here::here("results", outfile), overwrite = TRUE)
+openXL(here::here("results", outfile))
+
+
+```
+
+
+
+
+
+## Rob Plattner's summary table -- Early June 2021 version
+```{r}
+# get Rob's subset of likely payors
+rp_payors <- read_excel(path=here::here("data", "pptables 62.xlsx"),
+                     sheet="IOC_raw",
+                     range="A1:A32") %>%
+  filter(!is.na(uniname))
+
+# get all 108 entities
+dca_target <- 1000 # $ billions
+rp_base <- udca_base  %>%
+  select(uid, uniname, ptype, dca_base) %>%
+  left_join(rp_payors %>% mutate(payor=TRUE)) %>%
+  mutate(payor=ifelse(is.na(payor), FALSE, payor),
+         pct=dca_base / global6518_xcement,
+         dca_total=pct * dca_target,
+         dca_installment = dca_total / 5) %>% 
+  arrange(payor, -pct)
+
+rp_base %>%
+  group_by(payor) %>%
+  summarise(pct=sum(pct), dca_total=sum(dca_total))
+count(rp_base, payor)
+
+```
+
+
+```{r}
+# create the table
+
+# fn <- "PPTable_test.xlsx"
+fn <- "PPTable_v2.xlsx"
+
+getStyles(wb)
+
+wb <- loadWorkbook(file = here::here("data", "PPShell.xlsx"))
+
+# get the sheets we want
+sname <- "PPTable"
+cloneWorksheet(wb, sheetName=sname, clonedSheet = "TableShell_June")
+removeWorksheet(wb, "RobNotes")
+removeWorksheet(wb, "TableShell")
+removeWorksheet(wb, "TableShell_June")
+
+part1 <- rp_base %>%
+  filter(payor) %>%
+  select(uniname, pct, dca_total, dca_installment)
+
+gtotal <- part1 %>%
+  summarise(uniname="Grand total of above", 
+            pct=sum(pct), 
+            dca_total=sum(dca_total),
+            dca_installment=sum(dca_installment))
+
+# first write the details
+datastart <- 8
+
+# freezePane(wb, sname, firstActiveRow = 5, firstActiveCol = 3)
+# freezePane(wb, sname, firstActiveRow = 0, firstActiveCol = 0)
+# freezePane(wb, sname, firstRow = FALSE, firstCol = FALSE)
+
+writeData(wb, sheet = sname, x=part1, startCol=1, startRow=datastart, rowNames = FALSE, colNames = FALSE)
+
+# now write the summary
+writeData(wb, sheet = sname, x=gtotal, 
+          startCol=1, startRow=datastart + nrow(part1) + 1, rowNames = FALSE, colNames = FALSE)
+
+# define styles
+curr2 <- createStyle(numFmt = "$0.00")
+num2 <- createStyle(numFmt = "0.00")
+pct2 <- createStyle(numFmt = "0.00%")
+
+addStyle(wb, sheet = sname, style = pct2, rows=datastart:200, cols = 2, gridExpand = TRUE)
+addStyle(wb, sheet = sname, style = curr2, rows=datastart, cols = 3:4)
+addStyle(wb, sheet = sname, style = num2, rows=(datastart + 1):200, cols = 3:4, gridExpand = TRUE)
+
+totalrow <- datastart + nrow(part1) + 1
+totstyle <- createStyle(fontSize = 11, fgFill = "#f0f0f0", border = "TopBottom", borderColour = "#f0f0f0")
+
+addStyle(wb, sheet = sname, style = curr2, rows=totalrow, cols = 3:4)
+addStyle(wb, sheet = sname, style = totstyle, rows = totalrow, cols = 1:4, stack=TRUE)
+
+# freezePane(wb, sheet=sname,
+#            firstActiveRow = datastart - 1,
+#            firstActiveCol = "B")
+# freezePane(wb, sname, firstActiveRow = 5, firstActiveCol = 3)
+
+saveWorkbook(wb, file = here::here("results", fn), overwrite = TRUE)
+openXL(here::here("results", fn))
+
+
+# wb <- createWorkbook("Kenshin")
+# ## Add some worksheets
+# addWorksheet(wb, "Sheet 1")
+# addWorksheet(wb, "Sheet 2")
+# addWorksheet(wb, "Sheet 3")
+# addWorksheet(wb, "Sheet 4")
+# ## Freeze Panes
+# freezePane(wb, "Sheet 1", firstActiveRow = 5, firstActiveCol = 3)
+# freezePane(wb, "Sheet 2", firstCol = TRUE) ## shortcut to firstActiveCol = 2
+# freezePane(wb, 3, firstRow = TRUE) ## shortcut to firstActiveRow = 2
+# freezePane(wb, 4, firstActiveRow = 1, firstActiveCol = "D")
+# ## Save workbook
+# ## Not run:
+# saveWorkbook(wb, "freezePaneExample.xlsx", overwrite = TRUE)
+# openXL("freezePaneExample.xlsx")
+
+
+```
+
+
+## Rob Plattner's summary table -- May 2021 version
+```{r}
+# Investment Owned Fossil Fuel Companies                       State Owned Fossil Fuel Companies 
+# Name / Pollution Ownership Percentage/ Payment Obligation  Repeat for State Owned
+# 1
+# Subtotal     e.g.  20%                                                                             Subtotal  15%
+# Range    15% to 20%                                                                            Range 5%-15%  
+
+rptab <- udca_base  %>%
+  select(uid, uniname, ptype, dca_base) %>%
+  mutate(pct=dca_base / global6518_xcement * 100,
+         dca=pct * 1000 / 100) %>% # if $1 trillion assessment, DCA in $ billions
+  arrange(-pct)
+count(rptab, ptype)
+
+rptab %>%
+  group_by(ptype) %>%
+  summarise(pct=sum(pct), dca=sum(dca))
+
+sheets <- c("IOC_raw", "SOE_raw", "NationState_raw")
+psheets <- c("IOC", "SOE", "Nation-State")
+titles <- c("Investor-Owned Fossil Fuel Companies", "State-Operated Entities", "Nation-State Entities")
+
+
+wb <- loadWorkbook(file = here::here("results", "PPShell.xlsx"))
+for(i in 1:length(sheets)){
+  # define styles
+  curr2 <- createStyle(numFmt = "$0.00")
+  num2 <- createStyle(numFmt = "0.00")
+  pct2 <- createStyle(numFmt = "0.00%")
+  
+  # put the raw data in
+  addWorksheet(wb, sheets[i])
+  freezePane(wb,
+             sheet=sheets[i],
+             firstActiveRow = 2,
+             firstActiveCol = 3)
+  setColWidths(wb, sheet = sheets[i], cols = LETTERS[1:4], widths = c(50, 15, 10, 10))
+  df <- rptab %>%
+    filter(ptype==psheets[i]) %>%
+    select(-uid, -dca_base) %>%
+    mutate(pct = pct / 100)
+  writeData(wb, sheets[i], df, rowNames = FALSE)
+  addStyle(wb, sheets[i], style = pct2, rows=2:(nrow(df)+1), cols = 3, gridExpand = TRUE)
+  addStyle(wb, sheets[i], style = curr2, rows=2, cols = 4)
+  addStyle(wb, sheets[i], style = num2, rows=3:(nrow(df)+1), cols = 4, gridExpand = TRUE)
+  
+  # get subset of each group and put the data in
+  df2 <- df %>% 
+    select(-ptype) %>%
+    filter(pct >= .0005)
+
+  part1 <- df2 %>%
+    filter(row_number() <= 10)
+  
+  part2 <- df2 %>%
+    filter(row_number() > 10) %>%
+    summarise(uniname="Other entities with % of total at least 0.05%", pct=sum(pct), dca=sum(dca))
+  
+  gtotal <- df2 %>%
+    summarise(uniname="Grand total of above", pct=sum(pct), dca=sum(dca))
+    
+  
+  cloneWorksheet(wb, sheetName = psheets[i], clonedSheet = "TableShell")
+  writeData(wb, sheet = psheets[i], x=titles[i], startCol=1, startRow=5, rowNames = FALSE)
+  writeData(wb, sheet = psheets[i], x=part1, startCol=1, startRow=10, rowNames = FALSE, colNames = FALSE)
+  writeData(wb, sheet = psheets[i], x=part2, startCol=1, startRow=11 + nrow(part1), rowNames = FALSE, colNames = FALSE)
+  writeData(wb, sheet = psheets[i], x=gtotal, 
+            startCol=1, 
+            startRow=11 + nrow(part1) + nrow(part2) + 1, 
+            rowNames = FALSE, colNames = FALSE)
+  
+  
+  addStyle(wb, sheet = psheets[i], style = pct2, rows=10:100, cols = 2, gridExpand = TRUE)
+  addStyle(wb, sheet = psheets[i], style = curr2, rows=10, cols = 3)
+  addStyle(wb, sheet = psheets[i], style = num2, rows=11:100, cols = 3, gridExpand = TRUE)
+}
+wb
+worksheetOrder(wb)
+names(wb)
+removeWorksheet(wb, "RobNotes")
+removeWorksheet(wb, "TableShell")
+desiredsheetorder <- c(psheets, sheets)
+iorder <- match(desiredsheetorder, names(wb))
+worksheetOrder(wb) <- iorder
+saveWorkbook(wb, file = here::here("results", fn), overwrite = TRUE)
+openXL(here::here("results", fn))
+
+
+
+# vignette("Introduction", package = "openxlsx")
+# vignette("Formatting", package = "openxlsx")
+# vignette(package = "openxlsx")
+
+
+```
+
+
+
+# make some tables
+```{r}
+# simple shares table
+ucombo6518 %>%
+  select(uniname, ptype, co2, fmethane, total) %>%
+  mutate(pct=total / global6518 * 100) %>%
+  arrange(-pct)
+
+
+udca_base %>%
+  select(uniname, ptype, dca_base) %>%
+  mutate(pct=dca_base / global6518_xcement * 100,
+         dc1=pct * 1000 / 100) %>% # if $1 trillion assessment, DCA in $ billions
+  arrange(-pct)
+
+```
+
+
+
+# EVERYTHING BELOW HERE IS DATA PREP
+
+# Load previously prepared interim data
+
+```{r load_previously_created_data}
+load(file=here::here("data", "SumFiles.Rdata"), verbose=TRUE)
+load(file=here::here("data", "SumEvery.Rdata"), verbose=TRUE)
+
+# count(annual6518, ename, emeasure)
+
+```
+
+# make uniform names
+```{r}
+p1 <- sumrank_long %>%
+  select(starts_with("pname")) %>%
+  distinct()
+
+p2 <- combo6518 %>%
+  select(starts_with("pname"))
+	
+
+cnooc <- "CNOOC (China National Offshore Oil Co.; acq Nexen Jan2013)"
+cloudpeak <- "Cloud Peak, USA"
+pdvsa <- "Petroleos de Venezuela (PDVSA), Venezuala"
+up1 <- p1 %>%
+  mutate(uniname=str_trim(pname1_sumfiles),
+         uniname=case_when(str_detect(pname1_sumfiles, "Chesapeake") ~ "Chesapeake Energy, USA",
+                           str_detect(pname1_sumfiles, "China, PR") ~ "China, Peoples Rep. (coal & cement)",
+                           str_detect(pname1_sumfiles, "Cloud Peak") ~ cloudpeak,
+                           str_detect(pname1_sumfiles, "CNOOC") ~ cnooc,
+                           str_detect(pname1_sumfiles, "Czech Republic") ~ "Czech Republic (coal)",
+                           str_detect(pname1_sumfiles, "Czechoslovakia") ~ "Czechoslovakia (coal)",
+                           str_detect(pname1_sumfiles, "Former Soviet Union") ~ "FSU (Former Soviet Union) (coal oil gas)",
+                           str_detect(pname1_sumfiles, "Kazakhstan") ~ "Kazakhstan (coal)",
+                           str_detect(pname1_sumfiles, "North American Coal") ~ "North American Coal, USA",
+                           str_detect(pname1_sumfiles, "North Korea") ~ "North Korea (coal)",
+                           str_detect(pname1_sumfiles, "Petrobras") ~ "Petroleo Brasileiro (Petrobras), Brazil",
+                           str_detect(pname1_sumfiles, "Pemex") ~ "Petroleos Mexicanos (Pemex)",
+                           str_detect(pname1_sumfiles, "Petroleos de Venezuela") ~ pdvsa,
+                           pname1_sumfiles == "Poland" ~ "Poland (coal)",
+                           str_detect(pname1_sumfiles, "Polish Oil & Gas") ~ "Polish Oil & Gas Co., Poland",
+                           str_detect(pname1_sumfiles, "RAG") & 
+                             str_detect(pname1_sumfiles, "Germany") ~ "Ruhrkohle AG (RAG), Germany",
+                           str_detect(pname1_sumfiles, "Novatek") ~ "Novatek, Russian Federation",
+                           str_detect(pname1_sumfiles, "Rosneft") ~ "Rosneft, Russian Federation",
+                           str_detect(pname1_sumfiles, "Yukos") ~ "Yukos, Russian Federation",
+                           pname1_sumfiles == "Russian Federation" ~ "Russian Federation (excl. FSU) (coal)",
+                           str_detect(pname1_sumfiles, "Ukraine") ~ "Ukraine (coal)",
+                           # str_detect(pname1_sumfiles, "") ~ "",
+                           # str_detect(pname1_sumfiles, "") ~ "",
+                           # str_detect(pname1_sumfiles, "") ~ "",
+                           # str_detect(pname1_sumfiles, "") ~ "",
+                           # str_detect(pname1_sumfiles, "") ~ "",
+                           TRUE ~ uniname)) %>%
+  arrange(uniname)
+
+up2 <- p2 %>%
+  mutate(uniname=str_trim(pname1_sumevery),
+         uniname=case_when(str_detect(pname1_sumevery, "Alliance, USA") ~ "Alliance Resource Partners, USA",
+                           str_detect(pname1_sumevery, "Arch Coal, USA") ~ "Arch Coal Company, USA",
+                           str_detect(pname1_sumevery, "Bahrain Petroleum") ~ "Bahrain Petroleum Corporation",
+                           str_detect(pname1_sumevery, "British Coal") ~ "British Coal Corporation, UK",
+                           str_detect(pname1_sumevery, "CNOOC") ~ cnooc,
+                           str_detect(pname1_sumevery, "Cloud Peak") ~ cloudpeak,
+                           str_detect(pname1_sumevery, "Contura") ~ "Contura (AlphaNR, Massey), USA",
+                           str_detect(pname1_sumevery, "Czech Republic") ~ "Czech Republic (coal)",
+                           str_detect(pname1_sumevery, "Czechoslovakia") ~ "Czechoslovakia (coal)",
+                           str_detect(pname1_sumevery, "EQT, USA") ~ "EQT Corporation, USA",
+                           str_detect(pname1_sumevery, "HeidelbergCement") ~ "HeidelbergCement, Germany (acq Italcementi)",
+                           str_detect(pname1_sumevery, "Iraq National Oil") ~ "Iraq National Oil Company, Iraq",
+                           str_detect(pname1_sumevery, "National Iranian Oil") ~ "National Iranian Oil Co., Iran",
+                           str_detect(pname1_sumevery, "Oil & Gas Corp., India") ~ "Oil and Gas Corp., India",
+                           str_detect(pname1_sumevery, "Petoro. Norway") ~ "Petoro, Norway",
+                           str_detect(pname1_sumevery, "PetroChina") ~ "PetroChina (CNPC), China",
+                           str_detect(pname1_sumevery, "Petroleos de Venezuela") ~ pdvsa,
+                           str_detect(pname1_sumevery, "Petroleum Development Oman") ~ "Petroleum Development Oman, Oman",
+                           str_detect(pname1_sumevery, "Repsol, Spain") ~ "Repsol, Spain (acq Talisman May2015)",
+                           str_detect(pname1_sumevery, "Royal Dutch Shell") ~ 
+                             "Royal Dutch Shell, Netherlands (acq BG Feb16)",
+                           str_detect(pname1_sumevery, "Novatek") ~ "Novatek, Russian Federation",
+                           str_detect(pname1_sumevery, "Rosneft") ~ "Rosneft, Russian Federation",
+                           str_detect(pname1_sumevery, "Yukos") ~ "Yukos, Russian Federation",
+                           pname1_sumevery == "Russian Federation (excl. FSU) (coal)" ~ "Russian Federation (excl. FSU) (coal)",                           # str_detect(pname1_sumevery, "") ~ "",
+                           str_detect(pname1_sumevery, "Vistra") ~ "Vistra Luminant, USA",
+                           str_detect(pname1_sumevery, "Westmoreland") ~ "Westmoreland Mining, USA",
+                           # str_detect(pname1_sumevery, "") ~ "",
+                           # str_detect(pname1_sumevery, "") ~ "",
+                           TRUE ~ uniname)) %>%
+  arrange(uniname)
+
+uninames <- full_join(up1, up2, by="uniname") %>%
+  arrange(uniname) %>%
+  mutate(uid=row_number()) %>%
+  select(uid, uniname, everything())
+
+check <- uninames %>%
+  filter(is.na(pname1_sumfiles) | is.na(pname1_sumevery)) %>%
+  arrange(uniname)
+
+uninames %>%
+  filter(str_detect(uniname, "Russia"))
+
+```
+
+
+# put uniform names on files, construct related files, and save
+```{r}
+ucombo6518 <- combo6518 %>%
+  left_join(uninames %>% select(uid, uniname, pname1_sumevery), by = "pname1_sumevery") %>%
+  select(uid, uniname, everything())
+
+usumrank_long <- sumrank_long %>%
+  left_join(uninames %>% select(uid, uniname, pname1_sumfiles), by = "pname1_sumfiles") %>%
+  select(uid, uniname, everything())
+
+# get coal % and cement %
+coalcement <- usumrank_long %>%
+  mutate(vname = case_when(
+    category == "all" & etype == "total" ~ "total",
+    category == "all" & etype == "fmethane" ~ "fmethane",
+    category == "cement" & etype == "total" ~ "cement",
+    category == "coal" & etype == "fmethane" ~ "coal_methane",
+    category == "coal" & etype == "total" ~ "coal",
+    TRUE ~ "drop"
+    )) %>%
+  filter(vname != "drop") %>%
+  select(uid, uniname, ptype, vname, value) %>%
+  pivot_wider(names_from = vname) %>%
+  mutate(across(-c(uniname, ptype), .fns=replace_na, 0),
+         coal_share=coal / total,
+         cement_share=cement / total)
+
+udca_base <- ucombo6518 %>%
+  select(uid, uniname, ptype, co2, fmethane, total) %>%
+  left_join(coalcement %>% select(uid, uniname, coal_share, cement_share), by=c("uid", "uniname")) %>%
+  mutate(coal = total * coal_share,
+         cement = total * cement_share,
+         dca_base=total - coal - cement)
+
+
+
+```
+
+
+```{r save}
+global_shares <- xcoalcement %>%
+  summarise(dca_base=sum(dca_base), coal=sum(coal), cement=sum(cement), total=sum(total)) %>%
+  mutate(coal_share=coal / total, cement_share=cement / total)
+global_shares
+
+global6518_xcement <- global6518 * (1 - global_shares$cement_share)
+
+comment(global6518) <- "Global CO2 emissions (MtC02e) 1965-2018 includes coal and cement"
+comment(global_shares) <- "Global CO2 emissions (MtC02e) sum of top 108 1965-2018, with coal and cement estimates"
+comment(global6518_xcement) <- "Global CO2 emissions (MtC02e) 1965-2018 includes coal but estimated cement removed dca_base"
+comment (uninames) <- "df with uid, uninmame, plus alternative names used in files"
+comment (uninames) <- "df with uid, uninmame, plus alternative names used in files"
+comment(ucombo6518) <- "top 108 1965-2018; total includes coal and cement"
+comment(udca_base) <- "top 108 1965-2018; expanded ucombo6518 with coal cement ests; dca_base with both removed"
+comment(usumrank_long) <- "top 108 1751-2018; sums by firm by etype; can compute coal & cement percents for this period"
+
+save(global6518, global_shares, global6518_xcement,
+     ongl_factors, ng_factors, coal_factors, 
+     udca_base,
+     uninames, ucombo6518, usumrank_long,
+     file=here::here("data", "maindata.Rdata"))
+
+```
+
+
+
+
+# Notes
+
+<!-- 
+SumEvery	 all entities 1854-2018, by gas co2 and ch4, and global ff and cement	Rick Heede email'
+SumFiles	 Sum Ranking tab has sums from 1751-2018 	Boyd check, ok'd by Rick Heede
+
+
+Rick Heede May 14 6:15 pm
+  I can confrirm that with yet another summary sheet, attached.
+  
+  It lists all entities 1854-2018, by gas co2 and ch4, and global ff and cement.
+  
+  For your purposes, see column GW for each entity, and cell GW580 for global sum 1965-2018.
+  
+  Most usefully for you: see worksheet “All CMEs 1965-2018” clmns V-X.
+  
+  The global sum is slight;y revised from Oct20 update (reflecting Glbal Carbon Poroject slight revisions of FF enmissions), now totaling 1,409,854 MtCO2e.
+  
+  PS: I have yet to inciorporate Robbie Andrew’s “corrections” on cement emissions. (Andrew, Robbie (2019) Global CO2 emissions from cement production, 1928–2018, Earth Syst. Sci. Data, vol. 11:1675-1710.)
+
+
+-->
+
+
+
+# INTERIM Data preparation
+
+
+```{r filenames}
+# get data
+sfiles <- "SumFiles Boyd May21(Sent in afternoon).xlsx"
+severy <- "SumEvery Boyd May21.xlsx"
+seachev <- "SumEach&Every1850-2018 May21.xlsx"  # received 2021-08-27
+
+```
+
+
+```{r functions}
+get_xlcols <- function(start, end) {
+  all <- expand.grid(LETTERS, LETTERS)
+  all <- all[order(all$Var1,all$Var2), ]
+  xlcols <- c(LETTERS, do.call('paste0', all))
+  istart <- which(xlcols==start)
+  iend <- which(xlcols==end)
+  xlcols[istart:iend]
+}
+# get_xlcols("B", "AA")
+
+
+ladd <- function(elist, element){
+  ename <-deparse(substitute(element))
+  elist[[ename]] <- element
+  elist
+}
+
+```
+
+
+```{r constants}
+# Global MtCO2 & MtCH4 emissions, 1965-2018
+# File: "SumEvery Boyd May21.xlsx", sheet: "All CMEs 1965-2018", cell: W10
+global6518 <-  1409854  # same number as in Rick Heede's May 14 6:15 pm email
+
+
+# IPCC values (28Dec12):
+ongl_factors <- list()
+ongl_factors$flaring <-  15.9446317  # 15.94  # flaring (co2) = pls * flaring_factor / 10^3 (kg CO2/tCO2)
+ongl_factors$vented <-  3.8325929 # 3.833 # vented (co2) = pls * vented_factor / 10^3 (kg CO2/tCO2)
+ongl_factors$methanech4 <-  1.9235120  # EPA -- 1.924 # methanech4 = pls * methanech4_factor / 10^3 (kg CH4/tCO2)
+ongl_factors$methane_conversion <- 28  # methane (co2) = methanch4 * methane_conversion
+ongl_factors$methaneco2 <- ongl_factors$methanech4 * ongl_factors$methane_conversion # approx 53.86 # kg CO2e/tCO2
+ongl_factors
+
+ng_factors <- list()
+ng_factors$flaring <-   1.735564  #   # flaring (co2) = pls * flaring_factor / 10^3 (kg CO2/tCO2)
+ng_factors$vented <-  28.533725 # # vented (co2) = pls * vented_factor / 10^3 (kg CO2/tCO2)
+ng_factors$methanech4 <-  9.878313  # EPA -- 1.924 # methanech4 = pls * methanech4_factor / 10^3 (kg CH4/tCO2)
+ng_factors$methane_conversion <- 28  # methane (co2) = methanch4 * methane_conversion
+ng_factors$methaneco2 <- ng_factors$methanech4 * ng_factors$methane_conversion # approx 53.86 # kg CO2e/tCO2
+ng_factors$ownuse <-  57.264386
+ng_factors
+
+
+coal_factors <- list()
+coal_factors$methanech4 <- 4.0346184
+coal_factors$methane_conversion <- 28  # methane (co2) = methanech4 * methane_conversion
+coal_factors$methaneco2 <- coal_factors$methanech4 * coal_factors$methane_conversion  #	112.9693154
+coal_factors
+
+# pls: production less sequestration
+
+```
+
+
+
+# Parse 1850-2018 by company "SumEach&Every1850-2018 May21.xlsx" -- not by fuel type
+
+```{r examine_eachevery}
+path <- here::here("data_raw", seachev)
+excel_sheets(path)
+# "Control Sheet" # not needed
+# "Sum each CME"
+
+```
+
+
+```{r}
+df <- read_excel(path, sheet = "Sum each CME", range="B11:FV566", col_types = "text")
+glimpse(df)
+
+# initial cleaning before pivot ----
+rnames <- c(c("id", "pename", "petype", "note1", "anno", "note2", "note3", "note4"), names(df)[9:length(names(df))])
+# pename holds both polluter name and emission name
+# petype holds both polluter type and emission type
+rnames
+df2 <- df %>%
+  setNames(rnames)
+count(df2, pename)
+count(df2, petype)
+count(df2, note1)
+count(df2, note2)
+count(df2, note3)
+count(df2, note4)
+options(tibble.print_max = 200, tibble.print_min = 200) # if more than 60 rows, print 60 - enough for states
+count(df2, anno)
+options(tibble.print_max = 65, tibble.print_min = 65) # if more than 60 rows, print 60 - enough for states
+# ok to drop note1, note3, note4
+
+tmp <- df2 %>%
+  select(id, petype) %>%
+  mutate(petype=if_else(id=="76" & !is.na(id), "Nation-State", petype))
+
+# start
+df3 <- df2 %>%
+  mutate(id=as.integer(id),
+         petype=if_else(id==76 & !is.na(id), "Nation-State", petype),  # fix PTTEP, Thailand
+         pname=case_when(petype %in% c("IOC", "Nation-State", "SOE") ~ pename,
+                         TRUE ~ NA_character_),
+         ename=case_when(petype %in% c("MtCH4", "MtCO2", "MtCO2e") ~ pename,
+                         TRUE ~ NA_character_),
+         ptype=case_when(petype %in% c("IOC", "Nation-State", "SOE") ~ petype,
+                         TRUE ~ NA_character_),
+         etype=case_when(petype %in% c("MtCH4", "MtCO2", "MtCO2e") ~ petype,
+                         TRUE ~ NA_character_)) %>%
+  filter(!is.na(pename)) %>%  # these are the only ones we need -- must do before fill
+  fill(c(id, pname, ptype)) %>%
+  rename(fuel=note2, yearsavail=anno) %>%
+  select(-c(pename, petype, note1, note3, note4)) %>%
+  select(id, pname, ptype, ename, etype, fuel, yearsavail, everything())
+# at this point we should have 4 records per entity = 4 x 108 = 432
+count(df3, id, pname) %>% filter(n != 4)
+glimpse(df3)
+count(df3, ptype)
+count(df3, etype)
+count(df3, ename)
+count(df3, fuel)
+count(df3, fuel, yearsavail)
+
+# now split into two files
+fuels <- df3 %>%
+  filter(!is.na(fuel)) %>%
+  select(id, pname, fuel, yearsavail)
+# filter(!is.na(etype)) %>%
+
+# continue on with data cleaning
+df4 <- df3 %>%
+  filter(!is.na(etype)) %>% # we don't need the header rec for each pname
+  select(-fuel, -yearsavail)
+# we should have 3 x 108 records- 324
+count(df4, id, pname) %>% filter(n!=3)
+names(df4)
+  
+# pivot and complete cleaning
+df5 <- df4 %>%
+  pivot_longer(-c(id, pname, ptype, ename, etype), names_to = "year") %>%
+  mutate(year=as.integer(year))
+
+check <- df5 %>% filter(!is.na(value))  # examine the values -- good, none appear to be a non-sumber
+
+df6 <- df5 %>%
+  mutate(value=as.numeric(value)) %>%
+  filter(!is.na(value)) %>%
+  arrange(id, etype)
+
+# get some sums to compare against Rick Heede's spreadsheet
+df6 %>%
+  filter(etype=="MtCO2e") %>%
+  group_by(year) %>%
+  summarise(n=n(), sum=sum(value)) %>%
+  ht
+
+
+df6 %>%
+  filter(etype=="MtCO2e") %>%
+  summarise(sum=sum(value))  # good, matches: 1,258,891
+
+eachevery <- df6
+
+save(fuels, eachevery, file=here::here("data", "eachevery.rdata"))
+
+```
+
+
+```{r}
+
+load(file=here::here("data", "eachevery.rdata"), verbose=TRUE)
+
+# quick  check to see how  different years affect the largest
+eachevery %>%
+  filter(etype=="MtCO2e", year >= 1965, id!=36) %>%
+  filter(!str_detect(pname, "coal"), !ptype=="Nation-State") %>%
+  group_by(id, pname) %>%
+  summarise(val1965plus=sum(value[year >= 1965]), val2000plus=sum(value[year >= 2000]), .groups = "drop") %>%
+  mutate(share1965plus=val1965plus / sum(val1965plus),
+         share2000plus=val2000plus / sum(val2000plus),
+         change=share2000plus - share1965plus) %>%
+  arrange(-abs(change))
+
+eachevery %>%
+  filter(etype=="MtCO2e", year >= 2000) %>%
+  group_by(id, pname) %>%
+  summarise(value=sum(value), .groups = "drop") %>%
+  arrange(-value)
+
+
+```
+
+
+# Parse 1751-2018 "SumFiles Boyd May21(Sent in afternoon).xlsx" -- sums 1751-2018 by polluter, annual sums by fuel type
+
+djb: If I interpret the "SumFiles Boyd May21.xls" file properly, the "Sum Ranking" tab has sums from 1751-2018 (they match that period in the "Sum Oil, Gas, Coal, & Cement").
+
+We will use the following tabs:
+
++   "Sum Ranking" for sums (not annual) over 1751-2018 of emissions by polluter by type of fuel, emission 
+
+```{r examine_SumFiles}
+
+excel_sheets(here::here("data_raw", sfiles))
+# "CDIAC & CME 1810-2018 ":  CHART -- not needded
+# "Sum Oil, Gas, Coal, & Cement":  Sum 1751-1789 plus 1791-2018 annually, by type of emissions, NOT broken down by polluter
+# "Sum Ranking":  sums 1751-2018, by polluter and type of emission
+# "Data for Chart Top 20 source":  NOT NEEDED
+# "Chart Top20 MtCO2e Oct20":  CHART -- not needed
+
+
+```
+
+
+```{r get_SumFiles_CDIAC}
+# cdiac1 <- read_excel(here::here("data", sfiles), 
+#                  sheet = "Sum Ranking",
+#                  range = "D133:BH133",
+#                  col_names = FALSE,
+#                  col_types = "text")
+# glimpse(cdiac1)
+# cdiac2 = cdiac1 %>%
+#   select(oilngl...3)
+#   mutate(rank=0,
+#          pname="CDIAC",
+#          )
+
+# category = "CDIAC"
+  
+  
+```
+
+
+
+```{r get_SumFiles_bypolluter, rows.print=50}
+# get Sum Ranking first - will take a lot of cleaning and parsing
+sumrank1 <- read_excel(here::here("data_raw", sfiles),
+                 sheet = "Sum Ranking",
+                 range = "B18:BN125",  # column BN gives type of ownership, will be different in SumEvery
+                 col_names = get_xlcols("B", "BN"),
+                 col_types = "text")
+
+sumrank2 <- sumrank1 %>% 
+  select(where(~!all(is.na(.x))))
+
+renames <- tribble(
+  ~xlcol, ~vname,
+  "B", "rank",
+  "D", "pname1_sumfiles",
+  "F", "pls_oilngl",
+  "H", "flaring_oilngl",
+  "I", "vented_oilngl",
+  "J", "fmethanech4_oilngl",
+  "L", "fmethane_oilngl",
+  "M", "total_oilngl",
+  "R", "pname2_sumfiles",
+  "T", "pls_ng",
+  "V", "flaring_ng",
+  "W", "vented_ng",
+  "X", "fmethanech4_ng",
+  "Y", "fmethane_ng",
+  "Z", "ownuse_ng", 
+  "AA", "total_ng",
+  # "AF", "pname3_sumfiles",
+  "AH", "coalco2_coal",  # direct coal emissions
+  "AJ", "fmethanech4_coal",
+  "AK", "fmethane_coal",
+  "AL", "total_coal",
+  "AO", "total_cement",
+  # "AU", "pname4_sumfiles",
+  "AW", "fuelcement_all",
+  "AX", "fuelcementmtc_all",
+  "BA", "flaring_all",
+  "BB", "vented_all",
+  "BC", "ownuse_all",
+  "BD", "fmethanech4_all",
+  "BE", "fmethane_all",
+  "BG", "total_all",
+  "BN", "ptype"
+)
+
+
+# rename_with(.data, .fn, .cols = everything(), ...)
+frename <- function(cols, renames){
+  ivname <- match(cols, renames$xlcol)
+  renames$vname[ivname]
+}
+# frename(c("D", "J", "X"), renames)
+
+sumrank3 <- sumrank2 %>%
+  select(all_of(renames$xlcol)) %>%
+  rename_with(frename, renames$xlcol, renames) %>%
+  mutate(across(-c(pname1_sumfiles, pname2_sumfiles, ptype), as.numeric),
+         cement_cement=total_cement)  # create a detail column for cement, which only has a total
+
+sumrank3 %>%
+  filter(row_number() <=5) %>%
+  kbl(digits=0, format.args = list(big.mark=","), rst="html")
+
+glimpse(sumrank3)
+
+
+# after doing checks... make a long file
+sumrank_long <- sumrank3 %>%
+  pivot_longer(cols=-c(rank, pname1_sumfiles, pname2_sumfiles, ptype)) %>%
+  filter(!is.na(value)) %>%
+  separate(name, c("etype", "category")) %>%
+  mutate(eunits=case_when(
+    etype=="fmethanech4" ~ "MtCH4",
+    etype=="fuelcementmtc" ~ "MtC",
+    TRUE ~ "MtCO2e"))
+
+count(sumrank_long, category, etype, eunits)
+count(sumrank_long, etype)
+count(sumrank_long, pname1_sumfiles, pname2_sumfiles)
+
+# do some checks
+sumrank_long %>%
+  filter(eunits == "MtCO2e") %>%
+  # filter(category=="oilngl") %>%
+  pivot_wider(names_from = etype) %>%
+  mutate(across(-c(rank, pname1_sumfiles, pname2_sumfiles, ptype, category, eunits), .fns=replace_na, 0)) %>%
+  mutate(check=pls + flaring + vented + fmethane + fuelcement + ownuse + coalco2 + cement,
+         diff=check - total,
+         abspct=abs(diff) / total * 100) %>%
+  filter(abspct > .01)
+# good - everthing works
+
+glimpse(sumrank_long)
+
+```
+
+
+```{r parse_SumFiles_pnames}
+pnames <- sumrank1 %>%
+  select(rank=B, pname1=D, pname2=R, pname3=AF, pname4=AU, ptype=BN)
+
+pnames %>%
+  mutate(pname2=ifelse(pname1==pname2, NA_character_, pname2),
+         pname3=ifelse(pname1==pname3, NA_character_, pname3),
+         pname4=ifelse(pname1==pname4, NA_character_, pname4)) %>%
+  na.omit()
+# we have 2 names for HeidelbergCement, Germany (acq Italcementi):
+# 1)  HeidelbergCement, Germany (acq Italcementi)
+# 2)  HeidelbergCement, Germany
+# names 3 and 4 are the same as 2, so we only need to keep 1 and 2
+count(pnames, ptype)
+
+pnames_sumfiles <- pnames %>%
+  select(rank, ptype, pname1_sumfiles=pname1, pname2_sumfiles=pname2)
+
+pnames_sumfiles %>% ht
+
+```
+
+
+
+```{r save_SumFiles_results}
+# names(save_list)
+# save(save_list, file=here::here("data", "emissions.Rdata"))
+save(ongl_factors, ng_factors, coal_factors, sumrank_long, file=here::here("data", "SumFiles.Rdata"))
+
+load(file=here::here("data", "SumFiles.Rdata"), verbose=TRUE)
+
+```
+
+
+```{r}
+
+# it is some work to create a CDIAC record that lines up with the producers records
+cdiac1 <- read_excel(here::here("data_raw", sfiles),
+                 sheet = "Sum Ranking",
+                 range = "B133:BN133",
+                 col_names = get_xlcols("B", "BN"),
+                 col_types = "text")
+glimpse(cdiac1)
+
+
+cdiac2 <- cdiac1 %>%
+  mutate(rank="-99", 
+         pname="CDIAC emissions, MtCO2",
+         period="1751-2018") %>%
+  pivot_longer(cols=-c(rank, pname, period)) %>%
+  mutate(value=as.numeric(value)) %>%
+  filter(!is.na(value))
+  
+cdiac3 <- cdiac2 %>%
+  mutate(category=NA_character_,
+         etype=NA_character_,
+         eunits=NA_character_,
+         note=NA_character_)
+
+for(i in 1:nrow(cdiac3)) {
+  if(cdiac3$name[i]=="...5"){
+    cdiac3$category[i] <- "oilngl"
+    cdiac3$etype[i] <- "pls"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- ""
+  } else if(cdiac3$name[i]=="...8"){
+    cdiac3$category[i] <- "oilngl_ng"
+    cdiac3$etype[i] <- "flaring"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- "includes NG flaring"
+  } else if(cdiac3$name[i]=="...11"){
+    cdiac3$category[i] <- "oilngl"
+    cdiac3$etype[i] <- "fmethane"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- ""
+  } else if(cdiac3$name[i]=="...19"){
+    cdiac3$category[i] <- "ng"
+    cdiac3$etype[i] <- "pls"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- "includes vented"
+  } else if(cdiac3$name[i]=="...19"){
+    cdiac3$category[i] <- "ng"
+    cdiac3$etype[i] <- "fmethane"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- "CDIAC-EDGAR methane 1860-2018"
+  } else if(cdiac3$name[i]=="...19"){
+    cdiac3$category[i] <- "coal"
+    cdiac3$etype[i] <- "pls"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- ""
+  } else if(cdiac3$name[i]=="...19"){
+    cdiac3$category[i] <- "coal"
+    cdiac3$etype[i] <- "pls"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- ""
+  } else if(cdiac3$name[i]=="...19"){
+    cdiac3$category[i] <- "coal"
+    cdiac3$etype[i] <- "pls"
+    cdiac3$eunits[i] <- "MtCO2e"
+    cdiac3$note[i] <- ""
+  }
+  
+}
+
+
+```
+
+
+
+# Parse 6518 "SumEvery Boyd May21.xlsx"
+
+SumEvery all entities 1854-2018, by gas co2 and ch4, and global ff and cement	Rick Heede email
+
+Rick Heede May 14 6:15 pm
+  I can confrirm that with yet another summary sheet, attached.
+  
+  It lists all entities 1854-2018, by gas co2 and ch4, and global ff and cement.
+  
+  For your purposes, see column GW for each entity, and cell GW580 for global sum 1965-2018.
+  
+  Most usefully for you: see worksheet “All CMEs 1965-2018” clmns V-X.
+  
+  The global sum is slight;y revised from Oct20 update (reflecting Glbal Carbon Poroject slight revisions of FF emissions), now totaling 1,409,854 MtCO2e.
+  
+  PS: I have yet to incorporate Robbie Andrew’s “corrections” on cement emissions. (Andrew, Robbie (2019) Global CO2 emissions from cement production, 1928–2018, Earth Syst. Sci. Data, vol. 11:1675-1710.)
+
+
+```{r parse_SumEvery_all}
+
+# MtCO2 & MtCH4 1965-2018
+all6518 <- read_excel(here::here("data_raw", severy), 
+                 sheet = "All CMEs 1965-2018",
+                 range = "I13:J120",
+                 col_names = c("pname", "total"))
+all6518
+sum(all6518$total) # 1150069
+# M-N, Q-R are just different sorts:
+# - even though I-J is labeled MtCO2 & MtCH4
+# - while M-N and Q-R are labeled MtCO2
+# - all 3 sets of columns have the same numbers -- Rick's total emissions concept
+
+# The notgovrun V-W and govrun Z-AA cols are just breakdowns of the numbers above
+
+govrun6518 <- read_excel(here::here("data_raw", severy), 
+                 sheet = "All CMEs 1965-2018",
+                 range = "Z13:Z21",
+                 col_names = c("pname"))
+
+# I already checked that the pnames match
+all6518 <- all6518 %>%
+  left_join(govrun6518 %>% mutate(ptype="govrun"), by = "pname") %>%
+  mutate(ptype=ifelse(is.na(ptype), "other", ptype))
+
+```
+
+
+```{r parse_SumEvery_bkdwn_6518}
+df1 <- read_excel(here::here("data_raw", severy),
+                 sheet = "Sum each CME",
+                 range = "B13:GW566", # this gets just the companies, not the totals
+                 col_names=get_xlcols("B", "GW"),
+                 col_types = "text") %>%
+  select(pid=B, C, D, value=GW)
+df1
+
+# find and fix error:
+df1 %>% filter(pid==76)  # D should be "Nation-State" for this record
+df1 %>% filter(is.na(D)) %>% as.data.frame # good, PTTEP is the only bad record
+
+df1_fix <- df1 %>%
+  mutate(D=case_when(pid==76 ~ "Nation-State",
+                     TRUE ~ D))
+df1_fix
+
+df2 <- df1_fix %>%
+  filter(!is.na(D)) %>%
+  fill(pid) %>%
+  group_by(pid) %>%
+  mutate(pname=first(C),
+         ptype=first(D)) %>%
+  filter(row_number() != 1) %>%
+  rename(emeasure=C, eunits=D) %>%
+  mutate(value=as.numeric(value),
+         etype=case_when(eunits=="MtCO2" ~ "co2",
+                         eunits=="MtCH4" ~ "fmethane_ch4",
+                         eunits=="MtCO2e" ~ "total",
+                         TRUE ~ "error")) %>%
+  ungroup %>%
+  select(pid, pname, ptype, etype, emeasure, eunits, value)
+df2
+
+bkdwn6518 <- df2 %>%
+  select(-emeasure, -eunits) %>%
+  pivot_wider(names_from = etype) %>%
+  mutate(fmethane=total - co2) %>%
+  select(pid, pname, ptype, co2, fmethane, total, fmethane_ch4)
+
+bkdwn6518 %>%
+  summarise(across(-c(pid, pname, ptype), ~ sum(.)))
+
+
+```
+
+
+
+```{r parse_SumEvery_bkdwn_annual}
+# get the ANNUAL numbers by polluter, broken down by C02 and methane, labeled with ptype
+# this is a lot of parsing
+df1 <- read_excel(here::here("data_raw", severy),
+                 sheet = "Sum each CME",
+                 range = "B13:FV566", # this gets just the companies, not the totals
+                 # col_names=get_xlcols("B", "FV"),
+                 col_types = "text")
+glimpse(df1)
+names(df1)
+# now parse these data
+
+df2 <- df1 %>%
+  filter(!is.na(.[, 2])) %>%
+  mutate(recid=NA_integer_,
+         pnum=...1,
+         pname=NA_character_,
+         ptype=NA_character_,
+         ename=NA_character_,
+         emeasure=NA_character_) %>%
+  select(recid, pnum, pname, ptype, ename, emeasure, everything())
+glimpse(df2)
+# for(i in 1:nrow(df2)) df2$pnum[i] <- ifelse(is.na(df2$pnum[i]), df2$pnum[i - 1], df2$pnum[i])
+
+# if(is.na(df2$pnum[i])) df2$pnum[i] <- df2$pnum[i-1]
+for(i in 1:nrow(df2)){
+  if(!is.na(df2[i, "pnum"])) {
+    # we have the first of several records for a polluter
+    df2$recid[i] <- 1
+    df2$pname[i] <- df2$...2[i]
+    df2$ptype[i] <- df2$...3[i]
+  } else {
+    df2$recid[i] <- df2$recid[i - 1] + 1
+    df2$pnum[i] <- df2$pnum[i - 1]
+    df2$pname[i] <- df2$pname[i - 1]
+    df2$ptype[i] <- df2$ptype[i - 1]
+    df2$ename[i] <- df2$...2[i]
+    df2$emeasure[i] <- df2$...3[i]
+  }
+}
+
+df2
+
+count(df2, recid, ename, emeasure)
+count(df2, ptype)
+count(df2, pnum, pname)
+
+df3 <- df2 %>%
+  filter(recid != 1) %>%
+  mutate(ptype=ifelse(str_detect(pname, "PTTEP"), "Nation-State", ptype)) %>%  # Nation-State
+  select(recid, pnum, pname, ptype, ename, emeasure, ...9:...177)
+
+annual1850plus <- df3 %>%
+  pivot_longer(cols = -c(recid, pnum, pname, ptype, ename, emeasure),
+               names_to = "year") %>%
+  mutate(year=str_remove(year, "...") %>% as.integer,
+         year = year + 1841,
+         value=as.numeric(value))
+count(annual1850plus, year) %>% ht
+
+
+annual1850plus %>%
+  filter(ename=="Total entity emissions",
+         year >= 1965,
+         ptype %in% c("SOE", "IOC")) %>%
+  group_by(pname) %>%
+  summarise(value=sum(value, na.rm=TRUE)) %>%
+  arrange(-value) %>%
+  filter(!str_detect(pname, "British Coal Corp")) %>%
+  filter(row_number() <= 20) %>%
+  kbl(digits=0, format.args = list(big.mark=",")) %>%
+  kable_styling()
+  # kable(digits=0, format.args = list(big.mark=","))
+  
+# save_list <- ladd(save_list, df4)
+
+
+```
+
+
+```{r reconcile_names_sumevery}
+all6518  # does not have BHP, Australia or Murray Coal
+bkdwn6518
+
+pnames_sumevery <- all6518 %>%
+  mutate(pname2=pname,
+         pname2=case_when(rank==9 ~ "BHP, Australia",
+                          rank==52 ~ "Murray Coal, USA",
+                          TRUE ~ pname)) %>%
+  select(rank, pname1_sumevery=pname, pname2_sumevery=pname2)
+  
+  
+```
+
+
+```{r combine_files_sumevery}
+combo6518 <- pnames_sumevery %>%
+  left_join(all6518 %>% rename(pname1_sumevery=pname), by=c("rank", "pname1_sumevery")) %>%
+  full_join(bkdwn6518 %>%
+              select(pname2_sumevery=pname, ptype, co2, fmethane, total, fmethane_ch4),
+            by="pname2_sumevery")
+
+combo6518 %>%
+  filter(emissions != total) # good all are the same
+
+combo6518 <- combo6518 %>%
+  select(-emissions)
+
+```
+
+
+
+```{r save_sumevery_results}
+# names(save_list)
+# save(save_list, file=here::here("data", "emissions.Rdata"))
+save(global6518, combo6518, annual1850plus, file=here::here("data", "SumEvery.Rdata"))
+
+load(file=here::here("data", "SumEvery.Rdata"), verbose=TRUE)
+
+# rm(global6518, all6518, govrun6518, df4)
+
+
+```
+
+
+# OLD below here
+## OLD SumFiles
+```{r parse_SumFiles_oilNGL_1751_2018}
+# get total 1751-2018 (not annual) emissions by type for each company
+glimpse(sumRanking)
+# oilNGL
+# pls Production less sequestration
+
+oilNGL1 <- sumRanking %>%
+  select(rank=...1,
+         pname=...3,
+         pls=...5,
+         flaring=...7,
+         vented=...8,
+         fmethanech4=...9,
+         fmethane=...11,
+         oilngl=...12) %>%
+  mutate(across(-c(pname), as.numeric))
+
+
+# checks
+oilNGL1 %>% 
+  select(pname, pls, flaring) %>%
+  mutate(flaring2 = pls * ongl_factors$flaring / 1e3,
+         check = pls * flaring2 - flaring,
+         abspct = abs(check / flaring) * 100) %>%
+  filter(abspct > 0.01)
+
+oilNGL1 %>% 
+  select(pname, pls, vented) %>%
+  mutate(vented2 = ongl_factors$vented / 1e3,
+         check = pls * vented2 - vented,
+         abspct = abs(check / vented) * 100) %>%
+  filter(abspct > 0.01)
+
+oilNGL1 %>% 
+  select(pname, pls, fmethanech4, fmethane) %>%
+  mutate(fmethanech42 = pls * ongl_factors$methanech4 / 1e3,
+         check = fmethanech42 - fmethanech4,
+         abspct = abs(check / fmethanech4) * 100,
+         fmethane2 = fmethanech42 * ongl_factors$methane_conversion,
+         check2 = fmethane2 - fmethane,
+         abspct2 = abs(check2 / fmethane) * 100) %>%
+  filter(abspct2 > 0.01)
+
+oilNGL1 %>% 
+  select(pname, pls, oilngl) %>%
+  mutate(flaring = pls * ongl_factors$flaring / 1e3,
+         vented = pls * ongl_factors$vented / 1e3,
+         fmethanech4 = pls * ongl_factors$methanech4 / 1e3,
+         fmethane = fmethanech4 * ongl_factors$methane_conversion,
+         oilngl2 = pls + naz(flaring) + naz(vented) + naz(fmethane),  # missing if pls is missing
+         check = oilngl2 - oilngl,
+         abspct = abs(check / oilngl) * 100) %>%
+  filter(abspct > 0.01)
+
+# ok, all is good so save CALCULATED values
+
+
+oilngl <- oilNGL1 %>% 
+  select(rank, pname, pls) %>%
+  mutate(flaring = pls * ongl_factors$flaring / 1e3,
+         vented = pls * ongl_factors$vented / 1e3,
+         fmethanech4 = pls * ongl_factors$methanech4 / 1e3,
+         fmethane = fmethanech4 * ongl_factors$methane_conversion,
+         oilngl = pls + naz(flaring) + naz(vented) + naz(fmethane))  # missing if pls is missing
+
+oilngl_long <- oilngl %>%
+  pivot_longer(cols=-c(rank, pname),
+               names_to = "etype") %>%
+  mutate(category="oilngl",
+         units=ifelse(etype=="fmethanech4", "MtCH4", "MtCO2e"))
+
+```
+
+
+```{r parse_SumFiles_NG_1751_2018}
+# get total 1751-2018 (not annual) emissions by type for each company
+# IPCC values (28Dec12)	 1.736 	 28.53 	 9.878 	 276.6 	 57.26 	  EPA 	
+	# kg CO2/tCO2	kg CO2/tCO2	 kg CH4/tCO2 	kg CO2e/tCO2	kg CO2/tCO2		
+	# 						
+	# 			 28.0 	xCO2	 IPCC AR5 GWP 28xCO2 	
+
+glimpse(sumRanking)
+# pls Production less sequestration
+
+NG1 <- sumRanking %>%
+  select(rank=...1,
+         pname=...3,
+         pls=...19,
+         flaring=...21,
+         vented=...22,
+         fmethanech4=...23,
+         fmethane=...24,
+         ownuse=...25,
+         ng=...26) %>%
+  mutate(across(-c(pname), as.numeric))
+glimpse(NG1)
+
+
+# checks
+NG1 %>% 
+  select(pname, pls, flaring) %>%
+  mutate(flaring2 = ng_factors$flaring / 1e3,
+         check = pls * flaring2 - flaring,
+         abspct = abs(check / flaring) * 100) %>%
+  filter(abspct > 0.01)
+
+NG1 %>% 
+  select(pname, pls, vented) %>%
+  mutate(vented2 = ng_factors$vented / 1e3,
+         check = pls * vented2 - vented,
+         abspct = abs(check / vented) * 100) %>%
+  filter(abspct > 0.01)
+
+NG1 %>% 
+  select(pname, pls, fmethanech4, fmethane) %>%
+  mutate(fmethanech42 = pls * ng_factors$methanech4 / 1e3,
+         check = fmethanech42 - fmethanech4,
+         abspct1 = abs(check / fmethanech4) * 100,
+         fmethane2 = fmethanech42 * ng_factors$methane_conversion,
+         check2 = fmethane2 - fmethane,
+         abspct2 = abs(check2 / fmethane) * 100) %>%
+  filter(abspct2 > 0.01)
+
+NG1 %>% 
+  select(pname, pls, ownuse) %>%
+  mutate(ownuse2 = pls * ng_factors$ownuse / 1e3,
+         check = ownuse2 - ownuse,
+         abspct = abs(check / ownuse2) * 100) %>%
+  filter(abspct > 0.01)
+
+NG1 %>% 
+  select(pname, pls, ng) %>%
+  mutate(flaring = pls * ng_factors$flaring / 1e3,
+         vented = pls * ng_factors$vented / 1e3,
+         fmethanech4 = pls * ng_factors$methanech4 / 1e3,
+         fmethane = fmethanech4 * ng_factors$methane_conversion,
+         ownuse = pls * ng_factors$ownuse / 1e3,
+         ng2 = pls + naz(flaring) + naz(vented) + naz(fmethane) + naz(ownuse),  # missing if pls is missing
+         check = ng2 - ng,
+         abspct = abs(check / ng) * 100) %>%
+  filter(abspct > 0.01)
+
+# ok, all is good so save CALCULATED values
+
+
+ng <- NG1 %>% 
+  select(rank, pname, pls) %>%
+  mutate(flaring = pls * ng_factors$flaring / 1e3,
+         vented = pls * ng_factors$vented / 1e3,
+         fmethanech4 = pls * ng_factors$methanech4 / 1e3,
+         fmethane = fmethanech4 * ng_factors$methane_conversion,
+         ownuse = pls * ng_factors$ownuse / 1e3,
+         ng = pls + naz(flaring) + naz(vented) + naz(fmethane) + naz(ownuse))  # missing if pls is missing
+
+ng_long <- ng %>%
+  pivot_longer(cols=-c(rank, pname),
+               names_to = "etype") %>%
+  mutate(category="ng",
+         units=ifelse(etype=="fmethanech4", "MtCH4", "MtCO2e"))
+
+```
+
+
+```{r parse_SumFiles_coal_1751_2018}
+
+glimpse(sumRanking)
+# pls Production less sequestration
+
+coal1 <- sumRanking %>%
+  select(rank=...1,
+         pname=...3,
+         coalco2=...33,
+         fmethanech4=...35,
+         fmethane=...36,
+         coal=...37) %>%
+  mutate(across(-c(pname), as.numeric))
+glimpse(coal1)
+
+
+coal1 %>%
+  select(pname, coalco2, fmethanech4, fmethane) %>%
+  mutate(fmethanech42 = coalco2 * coal_factors$methanech4 / 1e3,
+         check = fmethanech42 - fmethanech4,
+         abspct1 = abs(check / fmethanech4) * 100,
+         fmethane2 = fmethanech42 * coal_factors$methane_conversion,
+         check2 = fmethane2 - fmethane,
+         abspct2 = abs(check2 / fmethane) * 100) %>%
+  filter(abspct2 > 0.01)
+
+
+coal1 %>%
+  select(pname, coalco2, fmethanech4, fmethane, coal) %>%
+  mutate(fmethanech4 = coalco2 * coal_factors$methanech4 / 1e3,
+         fmethane = fmethanech4 * coal_factors$methane_conversion,
+         coal2 = coalco2 + naz(fmethane),  # missing if coalco2 is missing
+         check = coal2 - coal,
+         abspct = abs(check / coal) * 100) %>%
+  filter(abspct > 0.01)
+
+
+coal <- coal1 %>%
+  select(rank, pname, coalco2, fmethanech4, fmethane) %>%
+  mutate(fmethanech4 = coalco2 * coal_factors$methanech4 / 1e3,
+         fmethane = fmethanech4 * coal_factors$methane_conversion,
+         coal = coalco2 + naz(fmethane))
+
+coal_long <- coal %>%
+  pivot_longer(cols=-c(rank, pname),
+               names_to = "etype") %>%
+  mutate(category="coal",
+         units=ifelse(etype=="fmethanech4", "MtCH4", "MtCO2e"))
+
+
+```
+
+
+```{r parse_SumFiles_cement_1751_2018}
+
+glimpse(sumRanking)
+# pls Production less sequestration
+
+cement <- sumRanking %>%
+  select(rank=...1,
+         pname=...3,
+         cement=...40) %>%
+  mutate(across(-c(pname), as.numeric))
+
+cement_long <- cement %>%
+  pivot_longer(cols=-c(rank, pname),
+               names_to = "etype") %>%
+  mutate(category="cement",
+         units="MtCO2e")
+
+```
+
+
+```{r parse_SumFiles_total_1751_2018}
+glimpse(sumRanking)
+# pls Production less sequestration
+
+co2_c_factor <- 3.664191
+# fuelcement_c = fuelcement / co2_c_factor
+
+total1 <- sumRanking %>%
+  select(rank=...1,
+         pname=...3,
+         fuelcement=...48,
+         fuelcement_c=...49,
+         flaring=...52,
+         vented=...53,
+         ownuse=...54,
+         fmethanech4=...55,
+         fmethane=...56,
+         total=...58) %>%
+  mutate(across(-c(pname), as.numeric))
+glimpse(total1)
+
+# compare by hand to Rick Heede's spreadhseet:
+total1 %>%
+  summarise(across(-c(rank, pname), ~ sum(., na.rm=TRUE)))
+
+# Rick's numbers:
+#  1,112,342 	 303,571 	71.4%		 7,408 	 6,394 	 9,397 	 4,405 	 123,350 	 -   	 1,258,891 
+# good
+
+# compare to calcs within this df
+total1 %>%
+  mutate(total2 = naz(fuelcement) + naz(flaring) + naz(vented) + naz(ownuse) + naz(fmethane),
+         diff= total2 - total,
+         abspct = abs(diff) / total * 100) %>%
+  filter(abspct > 0.01)
+# good, none
+
+total_long <- total1 %>%
+  pivot_longer(cols=-c(rank, pname),
+               names_to = "etype") %>%
+  mutate(category="total",
+         units=case_when(
+           etype=="fuelcement_c" ~ "MtC",
+           etype=="fmethanech4" ~ "MtCH4",
+           TRUE ~ "MtCO2e"))
+
+count(total_long, units)
+
+```
+
+
+
+```{r combine_Compare_SumFiles, rows.print=30}
+
+sumfiles_long <- bind_rows(oilngl_long,
+                           ng_long,
+                           coal_long,
+                           cement_long,
+                           total_long) %>%
+  filter(!is.na(value)) %>%
+  mutate(period="1751-2018") %>%
+  left_join(pnames2 %>% select(pname=name1, ptype), by = "pname")
+
+glimpse(sumfiles_long)
+count(sumfiles_long, category, etype, units)
+count(sumfiles_long, ptype)
+count(sumfiles_long %>% select(pname, ptype) %>% distinct(), ptype)
+# note that Rick has a different ptype in SumEvery that distinguishes SOE from Nation-State, although State may == Nation-State - need to check
+
+```
+
+
+```{r play}
+udca_base
+usumrank_long %>%
+  filter(str_detect(uniname, "Gazpr"))
+
+udca_base
+
+```
+
+
