@@ -129,9 +129,19 @@ nexus %>%
 
 
 # merge nexus and determine elements that go into potential payor status ----
+
+# CAUTION: TO REPRODUCE "PollutersPay_2000-2018_th1000_ex1000_keeplowgdp_v2.xlsx" -----
+#..  We need to classify Ovintiv as foreign (because predecessor EnCana was Canadian but Ovintiv is USA) ----
+# ovintiv_revert <- FALSE
+ovintiv_revert <- TRUE  # use this to reproduce the table with Ovintiv as foreign
+# END CAUTION ----
+
 base <- ongc_wide %>%
   left_join(nexus %>% 
               select(uid, uname, ptype, fd, nexus), by = c("uid", "uname")) %>%
+  # REVERT Ovintiv if needed ----
+  mutate(fd=ifelse(ovintiv_revert & str_detect(table_name, "Ovintiv"), "foreign", fd)) %>%
+  # END REVERT
   mutate(bankrupt=uid %in% c(coal_bankrupt, noncoal_bankrupt),
          zeroemit=ongc==0,
          lowgdp=uid %in% low_gdp) %>%
@@ -202,7 +212,7 @@ getfpath <- function(basename, thereshold, exclusion, droplowgdp, suffix, outdir
 }
 
 
-# create workbooks for tax ----
+# create workbooks for tax CAUTION: look at ovintiv_revert ----
 # no threshold exclusion, keep low gdp
 threshold <- 0
 exclusion <- 0
@@ -256,6 +266,13 @@ outpath <- getfpath(basename, thereshold, exclusion, droplowgdp, suffix, outdir)
 outpath
 makewb(taxbase, outpath)
 openXL(outpath)
+
+
+# coal companies ----
+taxbase %>%
+  filter(uid %in% coal_entities) %>%
+  select(uid, table_name, oil, gas, coal, ongc, ptype, fd, payor:tax_annual)
+
 
 
 # tax as % of market cap ----
